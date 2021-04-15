@@ -23,19 +23,20 @@ import (
 	"strconv"
 
 	configv1 "github.com/openshift/api/config/v1"
-	machinev1 "github.com/openshift/cluster-api/pkg/apis/machine/v1beta1"
 	"github.com/openshift/cluster-machine-approver/pkg/controller"
 	"github.com/openshift/cluster-machine-approver/pkg/metrics"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/klog/v2"
 	control "sigs.k8s.io/controller-runtime"
 	ctrl "sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
-
-	"k8s.io/klog/v2"
 )
 
 func main() {
 	var cliConfig string
 	var APIGroup string
+	var managementClientPath string
 
 	flagSet := flag.NewFlagSet("cluster-machine-approver", flag.ExitOnError)
 
@@ -44,6 +45,7 @@ func main() {
 	flagSet.Parse(os.Args[1:])
 
 	flagSet.StringVar(&APIGroup, "apigroup", "machine.openshift.io", "API group for machines, defaults to machine.openshift.io")
+	flagSet.StringVar(&managementClientPath, "management-kubeconfig", "", "management kubeconfig path, if empty use default client")
 
 	// Now let's start the controller
 	stop := make(chan struct{})
@@ -58,9 +60,14 @@ func main() {
 		metricsPort = fmt.Sprintf(":%d", v)
 	}
 
+	managementConfig, workloadConfig, err := setClientConfigs(managementClientPath)
+	if err != nil {
+		klog.Fatalf("Can't set client configs: %v", err)
+	}
+
 	// Create a new Cmd to provide shared dependencies and start components
 	klog.Info("setting up manager")
-	mgr, err := manager.New(control.GetConfigOrDie(), manager.Options{
+	mgr, err := manager.New(managementConfig, manager.Options{
 		MetricsBindAddress: metricsPort,
 	})
 	if err != nil {
@@ -74,17 +81,13 @@ func main() {
 		klog.Fatal(err)
 	}
 
-	if err := machinev1.AddToScheme(mgr.GetScheme()); err != nil {
-		klog.Fatal("unable to add Machines to scheme")
-	}
-
 	// Setup all Controllers
 	klog.Info("setting up controllers")
 	if err = (&controller.CertificateApprover{
-		Client:   mgr.GetClient(),
-		RestCfg:  mgr.GetConfig(),
-		Config:   controller.LoadConfig(cliConfig),
-		APIGroup: APIGroup,
+		NodeClient: mgr.GetClient(),
+		RestCfg:    mgr.GetConfig(),
+		Config:     controller.LoadConfig(cliConfig),
+		APIGroup:   APIGroup,
 	}).SetupWithManager(mgr, ctrl.Options{}); err != nil {
 		klog.Fatalf("unable to create CSR controller: %v", err)
 	}
@@ -98,4 +101,20 @@ func main() {
 	if err := mgr.Start(control.SetupSignalHandler()); err != nil {
 		klog.Fatalf("unable to run the manager: %v", err)
 	}
+}
+
+// setClientConfigs allow users to provide second config using management-kubeconfig, if specified
+// try to build it from provided path. First returned value is management config used for machines,
+// second is workload config used for Node/CSRs.
+func setClientConfigs(managementClientPath string) (*rest.Config, *rest.Config, error) {
+	if managementClientPath == "" {
+		return control.GetConfigOrDie(), control.GetConfigOrDie(), nil
+	}
+
+	managementConfig, err := clientcmd.BuildConfigFromFlags("", managementClientPath)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return managementConfig, control.GetConfigOrDie(), nil
 }

@@ -34,10 +34,11 @@ const (
 
 // MachineApproverReconciler reconciles a machine-approver  object
 type CertificateApprover struct {
-	client.Client
-	RestCfg  *rest.Config
-	Config   ClusterMachineApproverConfig
-	APIGroup string
+	NodeClient    client.Client
+	MachineClient client.Client
+	RestCfg       *rest.Config
+	Config        ClusterMachineApproverConfig
+	APIGroup      string
 }
 
 func (m *CertificateApprover) SetupWithManager(mgr ctrl.Manager, options controller.Options) error {
@@ -72,7 +73,7 @@ func pendingCertFilter(obj runtime.Object) bool {
 func (m *CertificateApprover) toCSRs(client.Object) []reconcile.Request {
 	requests := []reconcile.Request{}
 	list := &certificatesv1.CertificateSigningRequestList{}
-	err := m.List(context.Background(), list)
+	err := m.NodeClient.List(context.Background(), list)
 	if err != nil {
 		klog.Errorf("Unable to list pending CSRs: %v", err)
 		return nil
@@ -112,13 +113,13 @@ func caConfigMapFilter(obj runtime.Object, new runtime.Object) bool {
 func (m *CertificateApprover) Reconcile(ctx context.Context, req ctrl.Request) (reconcile.Result, error) {
 	csrs := &certificatesv1.CertificateSigningRequestList{}
 	klog.Infof("Reconciling CSR: %v", req.Name)
-	if err := m.List(ctx, csrs); err != nil {
+	if err := m.NodeClient.List(ctx, csrs); err != nil {
 		klog.Errorf("%v: Failed to list CSRs: %v", req.Name, err)
 		return reconcile.Result{}, fmt.Errorf("Failed to get CSRs: %w", err)
 	}
 
 	machineHandler := &machinehandler.MachineHandler{
-		Client:   m.Client,
+		Client:   m.MachineClient,
 		Config:   m.RestCfg,
 		Ctx:      ctx,
 		APIGroup: m.APIGroup,
@@ -172,7 +173,7 @@ func (m *CertificateApprover) reconcileCSR(csr certificatesv1.CertificateSigning
 		klog.Errorf("failed to get kubelet CA")
 	}
 
-	if authorize, err := authorizeCSR(m, m.Config, machineHandler, &csr, parsedCSR, kubeletCA); !authorize {
+	if authorize, err := authorizeCSR(m.NodeClient, m.Config, machineHandler, &csr, parsedCSR, kubeletCA); !authorize {
 		// Don't deny since it might be someone else's CSR
 		klog.Infof("%s: CSR not authorized", csr.Name)
 		return err
@@ -194,7 +195,7 @@ func (m *CertificateApprover) getKubeletCA() *x509.CertPool {
 		Namespace: configNamespace,
 		Name:      kubeletCAConfigMap,
 	}
-	if err := m.Get(context.Background(), key, configMap); err != nil {
+	if err := m.NodeClient.Get(context.Background(), key, configMap); err != nil {
 		klog.Errorf("failed to get kubelet CA: %v", err)
 		return nil
 	}
